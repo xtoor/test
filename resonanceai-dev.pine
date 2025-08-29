@@ -1,0 +1,161 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © xtoor 
+//@version=6
+indicator('Dynamic Resonance Scanner', overlay=false, max_labels_count=500)
+
+// Input parameters with dynamic defaults
+lookbackPeriod = input.int(200, 'Lookback Period', minval=50, maxval=500)
+volatilityThreshold = input.float(1.5, 'Volatility Multiplier', minval=1.0, maxval=3.0)
+minTouchPoints = input.int(3, 'Minimum Touch Points', minval=2, maxval=10)
+
+// Dynamic volatility calculation
+currentVolatility = ta.stdev(close, 20) / ta.atr(14)
+normalizedVolatility = currentVolatility / ta.sma(currentVolatility, 50)
+
+// Dynamic threshold adjustment
+dynamicThreshold = volatilityThreshold * (1 + (normalizedVolatility - 1) * 0.5)
+
+// Calculate support and resistance levels with dynamic adaptation
+var float[] supportLevels = array.new_float()
+var float[] resistanceLevels = array.new_float()
+var int[] supportCounts = array.new_int()
+var int[] resistanceCounts = array.new_int()
+
+// Dynamic level detection with adaptive tolerance
+detectionTolerance = ta.atr(14) * 0.1 * (1 + (normalizedVolatility - 1) * 0.3)
+
+// Clear levels every bar to repopulate
+array.clear(supportLevels)
+array.clear(resistanceLevels)
+array.clear(supportCounts)
+array.clear(resistanceCounts)
+
+// Adjust lookback to available bars
+int effectiveLookback = math.min(lookbackPeriod, bar_index)
+
+// Detect support and resistance levels
+for i = 1 to effectiveLookback by 1
+    float currentLow = low[i]
+    float currentHigh = high[i]
+    
+    bool isSupport = true
+    bool isResistance = true
+    
+    // Skip if not enough bars for touch points
+    if i + minTouchPoints > bar_index
+        isSupport := false
+    else
+        // Check if current low is a support level
+        for j = 1 to minTouchPoints by 1
+            if math.abs(low[i + j] - currentLow) > detectionTolerance
+                isSupport := false
+                break
+    
+    // Skip if not enough bars for touch points
+    if i + minTouchPoints > bar_index
+        isResistance := false
+    else
+        // Check if current high is a resistance level
+        for j = 1 to minTouchPoints by 1
+            if math.abs(high[i + j] - currentHigh) > detectionTolerance
+                isResistance := false
+                break
+    
+    // Add valid support levels
+    if isSupport
+        bool levelExists = false
+        for k = 0 to array.size(supportLevels) - 1 by 1
+            if math.abs(array.get(supportLevels, k) - currentLow) <= detectionTolerance
+                array.set(supportCounts, k, array.get(supportCounts, k) + 1)
+                levelExists := true
+                break
+        if not levelExists
+            array.push(supportLevels, currentLow)
+            array.push(supportCounts, 1)
+    
+    // Add valid resistance levels
+    if isResistance
+        bool levelExists = false
+        for k = 0 to array.size(resistanceLevels) - 1 by 1
+            if math.abs(array.get(resistanceLevels, k) - currentHigh) <= detectionTolerance
+                array.set(resistanceCounts, k, array.get(resistanceCounts, k) + 1)
+                levelExists := true
+                break
+        if not levelExists
+            array.push(resistanceLevels, currentHigh)
+            array.push(resistanceCounts, 1)
+
+// Dynamic scoring system
+float[] supportScores = array.new_float()
+float[] resistanceScores = array.new_float()
+
+// Calculate dynamic scores based on touch count and recent activity
+for i = 0 to array.size(supportLevels) - 1 by 1
+    float level = array.get(supportLevels, i)
+    int count = array.get(supportCounts, i)
+    when = ta.valuewhen(math.abs(low - level) <= detectionTolerance, bar_index, 0)
+    float recencyScore = na(when) ? 0 : 1.0 / (bar_index - when + 1)
+    float dynamicScore = count * (1 + recencyScore * 0.5) * (1 + (1 / normalizedVolatility))
+    array.push(supportScores, dynamicScore)
+
+for i = 0 to array.size(resistanceLevels) - 1 by 1
+    float level = array.get(resistanceLevels, i)
+    int count = array.get(resistanceCounts, i)
+    when = ta.valuewhen(math.abs(high - level) <= detectionTolerance, bar_index, 0)
+    float recencyScore = na(when) ? 0 : 1.0 / (bar_index - when + 1)
+    float dynamicScore = count * (1 + recencyScore * 0.5) * (1 + normalizedVolatility)
+    array.push(resistanceScores, dynamicScore)
+
+// Find strongest levels
+float strongestSupport = na
+float strongestResistance = na
+float maxSupportScore = -1.0
+float maxResistanceScore = -1.0
+
+for i = 0 to array.size(supportScores) - 1 by 1
+    if array.get(supportScores, i) > maxSupportScore
+        maxSupportScore := array.get(supportScores, i)
+        strongestSupport := array.get(supportLevels, i)
+
+for i = 0 to array.size(resistanceScores) - 1 by 1
+    if array.get(resistanceScores, i) > maxResistanceScore
+        maxResistanceScore := array.get(resistanceScores, i)
+        strongestResistance := array.get(resistanceLevels, i)
+
+// Dynamic breakout detection
+bool supportBreakout = low < strongestSupport and close > strongestSupport
+bool resistanceBreakout = high > strongestResistance and close < strongestResistance
+
+// Plot results
+plot(strongestSupport, 'Strongest Support', color=color.green, linewidth=2, style=plot.style_circles)
+plot(strongestResistance, 'Strongest Resistance', color=color.red, linewidth=2, style=plot.style_circles)
+
+// Alert conditions
+alertcondition(supportBreakout, 'Support Rejection', 'Strong support level tested and held!')
+alertcondition(resistanceBreakout, 'Resistance Rejection', 'Strong resistance level tested and held!')
+
+// Table display for scanner
+var table scanTable = table.new(position.top_right, 2, 6, bgcolor=color.white, border_width=1)
+
+if barstate.islast
+    table.cell(scanTable, 0, 0, 'Parameter', bgcolor=color.gray)
+    table.cell(scanTable, 1, 0, 'Value', bgcolor=color.gray)
+    
+    table.cell(scanTable, 0, 1, 'Current Volatility')
+    table.cell(scanTable, 1, 1, str.tostring(normalizedVolatility, '#.##'))
+    
+    table.cell(scanTable, 0, 2, 'Support Level')
+    table.cell(scanTable, 1, 2, str.tostring(strongestSupport, '#.####'))
+    
+    table.cell(scanTable, 0, 3, 'Resistance Level')
+    table.cell(scanTable, 1, 3, str.tostring(strongestResistance, '#.####'))
+    
+    table.cell(scanTable, 0, 4, 'Support Score')
+    table.cell(scanTable, 1, 4, str.tostring(maxSupportScore, '#.##'))
+    
+    table.cell(scanTable, 0, 5, 'Resistance Score')
+    table.cell(scanTable, 1, 5, str.tostring(maxResistanceScore, '#.##'))
+
+// Output for scanner
+plotchar(supportBreakout, 'Support Breakout', '▲', location.belowbar, color=color.green, size=size.small)
+plotchar(resistanceBreakout, 'Resistance Breakout', '▼', location.abovebar, color=color.red, size=size.small)
